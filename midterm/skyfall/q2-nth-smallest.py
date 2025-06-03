@@ -1,5 +1,4 @@
 # 咿呀哈
-# Please Keep this line
 lst = [2, 2, 3, 5, 6, 7, 9]
 
 N = 4

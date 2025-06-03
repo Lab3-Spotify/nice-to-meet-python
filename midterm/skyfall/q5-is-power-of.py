@@ -1,3 +1,37 @@
+# 咿呀哈
+a = int(input("咿呀哈："))
+b = float(input("咿呀哈哈："))
+
+check = False
+if b == 1:
+    print("True")
+    exit()
+count = 1
+a_positive = 0
+while abs(a_positive) < abs(b):
+    a_positive = a ** count
+    if a_positive == b:
+        check = True
+        break
+    count += 1
+
+if check:
+    print("True")
+else:
+    count = 1
+    a_negative = a
+    while abs(a_negative) > abs(b):
+        a_negative = a ** -count
+        if a_negative == b:
+            check = True
+            break
+        count += 1
+
+    if check:
+        print("True")
+    else:
+        print("False")
+        
 """
 .............................................................................
 .............................................................................
@@ -42,3 +76,4 @@
 .............................................................................
 .............................................................................
 """
+
