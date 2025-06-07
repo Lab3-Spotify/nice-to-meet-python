@@ -198,3 +198,4 @@ cython_debug/
 !*.secret
 git-secret/boris/secret.yaml
 git-secret/skyfall/secret.yaml
+git-secret/boris/secret2.yaml
