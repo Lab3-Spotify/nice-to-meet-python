@@ -1,3 +1,5 @@
+git-secret/*/secret.yaml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -192,3 +194,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+.gitsecret/keys/random_seed
+!*.secret
+git-secret/boris/secret.yaml
+git-secret/skyfall/secret.yaml
+git-secret/boris/secret2.yaml
