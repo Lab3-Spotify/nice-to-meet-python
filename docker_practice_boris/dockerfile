@@ -1,0 +1,14 @@
+FROM python:3.10.13-slim
+
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+EXPOSE 8000
+
+'''
+先透過docker run -it -v ${PWD}:/app -p 8000:8000 -d {id}建立container
+以docker exec -it bash進入容器內建立django專案
+在bash裡執行django-admin startproject mysite .
+'''
