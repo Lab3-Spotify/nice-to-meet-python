@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from account.models import UserProfile, UserType
+from django.contrib.auth import get_user_model
 
 
 class RegisterSerializer(serializers.Serializer):
@@ -8,17 +9,29 @@ class RegisterSerializer(serializers.Serializer):
     - email
     - password
     - name
-    - phone (可選)
-    - type  (可選，預設 BASIC)
+    - phone
+    - type
     """
     email = serializers.EmailField()
     password = serializers.CharField(min_length=6, write_only=True)
     name = serializers.CharField(max_length=120)
     phone = serializers.CharField(max_length=30, required=False, allow_blank=True)
-    type = serializers.ChoiceField(
-        choices=UserType.choices,
-        required=False,
-    )
+    
+    def validate_email(self, value):
+        """
+        建帳號前先確認此email在User和UserProfile都沒被用過
+        """
+        User = get_user_model()
+
+        # 檢查 Django User
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Email 已被使用")
+
+        # 檢查 UserProfile
+        if UserProfile.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Email 已被使用")
+
+        return value
 
 
 class LoginSerializer(serializers.Serializer):
@@ -62,7 +75,7 @@ class ProfileUpdateSerializer(serializers.Serializer):
     """
     name = serializers.CharField(max_length=120, required=False)
     phone = serializers.CharField(max_length=30, required=False, allow_blank=True)
-    email = serializers.EmailField(required=False)  # new_email
+    email = serializers.EmailField(required=False)
     type = serializers.ChoiceField(
         choices=UserType.choices,
         required=False,

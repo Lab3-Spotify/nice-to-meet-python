@@ -1,4 +1,9 @@
-from django.contrib.auth import authenticate, login, logout
+# account/views.py
+from decimal import Decimal
+
+from django.contrib.auth import authenticate, login, logout, get_user_model
+from django.db import transaction
+from django.db.models import F
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from utils.views import BaseAPIView
@@ -13,22 +18,32 @@ from account.serializers import (
     ProfileUpdateSerializer,
     DepositSerializer,
 )
-from account.services import (
-    create_profile_with_user,
-    update_profile_and_email_sync,
-    deposit_balance,
-)
+from market.models import Cart
 
+User = get_user_model()
+
+
+# (gpt建議的)處理username=name後不可重複function
+def _generate_unique_username(base: str) -> str:
+    base = (base or "").strip() or "user"
+    candidate = base
+    counter = 1
+    while User.objects.filter(username=candidate).exists():
+        candidate = f"{base}{counter}"
+        counter += 1
+    return candidate
 
 class RegisterView(BaseAPIView):
     """
     註冊帳號：
-     1. 建 UserProfile和Django User
-     2. 建 Cart
-     3. 回傳 Profile 資訊
+     1. 建 Django User
+     2. 建 UserProfile
+     3. 建 Cart
+     4. 回傳 Profile 資訊
     """
     permission_classes = [AllowAny]
 
+    @transaction.atomic
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -37,19 +52,32 @@ class RegisterView(BaseAPIView):
         password = serializer.validated_data["password"]
         name = serializer.validated_data["name"]
         phone = serializer.validated_data.get("phone", "")
-        user_type = serializer.validated_data.get("type", UserType.BASIC)
+        user_type = UserType.BASIC
 
-        # 呼叫 service 進行實際建立
-        profile = create_profile_with_user(
+        # 1. 建 Django User
+        username = _generate_unique_username(name)
+        user = User.objects.create_user(
+            username=username,
             email=email,
             password=password,
-            name=name,
-            phone=phone,
-            user_type=user_type,
+            is_active=True,
         )
 
-        # 註冊完成後自動登入
-        login(request, profile.user)
+        # 2. 建 UserProfile
+        profile = UserProfile.objects.create(
+            user=user,
+            name=name,
+            phone=phone,
+            email=email,
+            type=user_type,
+            balance=Decimal("0.00"),
+        )
+
+        # 3. 建 Cart (一人一車)
+        Cart.objects.create(user=user)
+
+        # 4. 註冊完成後自動登入
+        login(request, user)
 
         return APISuccessResponse(
             data=ProfileSerializer(profile).data,
@@ -61,10 +89,9 @@ class LoginView(BaseAPIView):
     """
     登入：
      1. 用 UserProfile.email 找人
-     2. 確認該 user.is_active
-     3. 驗證密碼
-     4. 成功後 login() 建 session
-     5. 回傳該使用者的 Profile 資料
+     2. 確認 user.is_active
+     3. authenticate 檢查密碼
+     4. login 建 session
     """
     permission_classes = [AllowAny]
 
@@ -75,7 +102,7 @@ class LoginView(BaseAPIView):
         email = serializer.validated_data["email"]
         password = serializer.validated_data["password"]
 
-        # 用UserProfile對User
+        # 1. 用 UserProfile 對到 user
         try:
             profile = UserProfile.objects.select_related("user").get(email=email)
         except UserProfile.DoesNotExist:
@@ -85,32 +112,28 @@ class LoginView(BaseAPIView):
                 details={"email": email},
             )
 
-        # 檢查是否啟用
+        # 2. 檢查啟用狀態
         if not profile.user.is_active:
             return APIFailedResponse(
                 code=ResponseCode.USER_INACTIVE,
                 msg="用戶已被停用",
             )
 
-        # 驗證密碼
-        # 預設authenticate() 走 username/password。
-        # 在create_profile_with_user() 時，把 username 設成 email。
+        # 3. 驗證密碼
         user = authenticate(
             request,
             username=profile.user.username,
             password=password,
         )
-
         if not user:
             return APIFailedResponse(
                 code=ResponseCode.UNAUTHORIZED,
                 msg="帳號或密碼錯誤",
             )
 
-        # 建session
+        # 4. 建 session
         login(request, user)
 
-        # 回傳profile資訊
         return APISuccessResponse(
             data=ProfileSerializer(profile).data,
             msg="登入成功",
@@ -119,9 +142,7 @@ class LoginView(BaseAPIView):
 
 class LogoutView(BaseAPIView):
     """
-    登出：
-     1. 需要已登入（IsAuthenticated）
-     2. 呼叫 logout() 清掉 session
+    登出：清掉 session
     """
     permission_classes = [IsAuthenticated]
 
@@ -134,10 +155,7 @@ class LogoutView(BaseAPIView):
 
 class MeView(BaseAPIView):
     """
-    讀寫自己的資料：
-    GET  -> 回傳自己的Profile
-    PATCH -> 更新name/phone/type/email
-    若 email 有更新會同步到 Django User
+    讀寫自己的資料
     """
     permission_classes = [IsAuthenticated]
 
@@ -147,41 +165,60 @@ class MeView(BaseAPIView):
             data=ProfileSerializer(profile).data,
         )
 
+    @transaction.atomic
     def patch(self, request):
         profile = request.user.profile
         serializer = ProfileUpdateSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
 
-        try:
-            updated_profile = update_profile_and_email_sync(
-                profile=profile,
-                name=serializer.validated_data.get("name"),
-                phone=serializer.validated_data.get("phone"),
-                new_email=serializer.validated_data.get("email"),
-                new_type=serializer.validated_data.get("type"),
-            )
-        except ValueError as e:
-            # 如email已被使用
-            return APIFailedResponse(
-                code=ResponseCode.EMAIL_IN_USE,
-                msg=str(e),
-            )
+        name = serializer.validated_data.get("name")
+        phone = serializer.validated_data.get("phone")
+        new_email = serializer.validated_data.get("email")
+        new_type = serializer.validated_data.get("type")
+
+        # 1. 先改單純欄位
+        if name is not None:
+            profile.name = name
+        if phone is not None:
+            profile.phone = phone
+        if new_type is not None:
+            profile.type = new_type
+
+        # 2. 如果要改 email，就要做唯一性檢查 + 同步到 Django User
+        if new_email is not None:
+            # 檢查 Django User 是否已用這個 email
+            if User.objects.filter(email__iexact=new_email).exclude(pk=profile.user.pk).exists():
+                return APIFailedResponse(
+                    code=ResponseCode.CONFLICT,
+                    msg="Email 已被使用",
+                )
+            # 檢查 UserProfile 是否已用這個 email
+            if UserProfile.objects.filter(email__iexact=new_email).exclude(pk=profile.pk).exists():
+                return APIFailedResponse(
+                    code=ResponseCode.CONFLICT,
+                    msg="Email 已被使用",
+                )
+
+            # 同步三個欄位
+            profile.email = new_email
+            profile.user.email = new_email
+            profile.user.save(update_fields=["email", "username"])
+
+        profile.save()
 
         return APISuccessResponse(
-            data=ProfileSerializer(updated_profile).data,
+            data=ProfileSerializer(profile).data,
             msg="更新成功",
         )
 
 
 class DepositView(BaseAPIView):
     """
-    加值 / 儲值 API：
-     1. 驗證 amount > 0
-     2. 呼叫 deposit_balance()
-     3. 回傳更新後餘額
+    儲值 / 加值
     """
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request):
         profile = request.user.profile
 
@@ -190,19 +227,21 @@ class DepositView(BaseAPIView):
 
         amount = serializer.validated_data["amount"]
 
-        try:
-            updated_profile = deposit_balance(
-                profile=profile,
-                amount=amount,
-            )
-        except ValueError as e:
-            # 通常是 amount <= 0
+        # 驗證金額
+        if amount <= 0:
             return APIFailedResponse(
-                code=ResponseCode.INVALID_AMOUNT,
-                msg=str(e),
+                code=ResponseCode.VALIDATION_ERROR,
+                msg="儲值金額必須大於0",
             )
 
+        # 原子性更新餘額
+        UserProfile.objects.filter(pk=profile.pk).update(
+            balance=F("balance") + amount
+        )
+
+        profile.refresh_from_db(fields=["balance"])
+
         return APISuccessResponse(
-            data={"balance": str(updated_profile.balance)},
+            data={"balance": str(profile.balance)},
             msg="儲值成功",
         )
